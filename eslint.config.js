@@ -21,11 +21,11 @@ const BOUNDARY_MESSAGE =
 
 module.exports = tseslint.config(
   {
-    // Ignore build output, dependencies, and the web workspace.
-    // `web/**` is a SEPARATE npm workspace (ESM + Vite + React) with its own
-    // toolchain (tsc/vitest) and React-specific lint directives; it is not part
-    // of the backend (CommonJS, TS strict) lint surface.
-    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'web/**'],
+    // Ignore build output, dependencies, and the separate front-end packages.
+    // `web/**` (the bw ui workspace) and `website/**` (the marketing site, a
+    // standalone Next.js app) each have their own toolchain + lint config; they
+    // are not part of the backend (CommonJS, TS strict) lint surface.
+    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'web/**', 'website/**'],
   },
   ...tseslint.configs.recommended,
   {
