@@ -1,0 +1,22 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+web/dist
+
+# Branchwater local state + dump artifacts
+.bw
+*.dump
+
+# Test / coverage
+coverage
+
+# Local tooling state (browser daemon, OS cruft)
+.browse
+.DS_Store
+
+# npm pack artifacts / local env
+*.tgz
+.env
+.env.*

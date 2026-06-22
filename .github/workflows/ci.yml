@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Least privilege: CI only needs to read the repo (no writes, no packages).
+permissions:
+  contents: read
+
+# Cancel superseded in-progress runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# No database is provisioned. The gated Postgres integration/e2e tests detect
+# an unset BW_TEST_PG_URL and skip themselves, so CI stays green without a DB.
+jobs:
+  ci:
+    name: Lint, typecheck, test & build (backend + web)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js (LTS)
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install dependencies (root + web workspace)
+        # The web UI is an npm workspace of the root package, so a single install
+        # at the repo root resolves and installs both the backend and `web` deps.
+        # Prefer a reproducible install from the lockfile; fall back to a plain
+        # install if the lockfile is missing or out of sync.
+        run: npm ci || npm install
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck (backend)
+        run: npm run typecheck
+
+      - name: Typecheck (web)
+        run: npm -w web run typecheck
+
+      - name: Test (backend / jest)
+        # BW_TEST_PG_URL is intentionally unset, so the gated Postgres
+        # integration/e2e tests skip themselves and no database is required.
+        run: npm test
+
+      - name: Test (web / vitest)
+        run: npm -w web run test
+
+      - name: Build web bundle
+        # Build the web bundle explicitly so a web-only regression fails fast and
+        # visibly. (The root `build` step below also produces it via build-web.mjs.)
+        run: npm -w web run build
+
+      - name: Build (backend + staged web)
+        run: npm run build

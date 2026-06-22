@@ -1,0 +1,644 @@
+{
+  "title": "Branchwater Web UI (bw ui) — visual snapshots, branches & cross-branch DB diff",
+  "branch": "feat/branchwater-web-ui",
+  "mode": "EXPANSION",
+  "overview": "A local web UI for Branchwater. `bw ui` starts a localhost HTTP server (built at the composition root, reusing the existing Orchestrator) serving a React + Vite + Tailwind app where a developer runs every version-control op (snapshot/branch/checkout/delete, destructive ones gated by a confirm dialog), browses each engine's tables with row counts and paginated previews, and diffs database contents across branches. The core stays engine-agnostic via a new OPTIONAL adapter capability (introspection + scratch-DB materialization); engines that can't introspect opt out.",
+  "scopeChallenge": "EXPANSION confirmed with the user. Reuses orchestrator/adapter/manifest heavily but adds a large net-new surface (local server, React frontend, new adapter capability, complex scratch-DB diff), warranting comprehensive tests. The cross-branch diff is the riskiest/heaviest piece and stays in this plan but in later DAG layers (server + table browser are usable first). Confirmed: local web app (not TUI/desktop); max data depth (tables + counts + preview + cross-branch diff); engine-agnostic optional InspectableAdapter/MaterializableAdapter capabilities; boundary rule extended to src/server/**. Ruled out: writing/editing DB rows from the UI (read-only), auth beyond localhost+token, remote/multi-user hosting, a second adapter, realtime push. Structure: the strict-CJS Node backend and the ESM/Vite React frontend are different build systems, so the frontend is a new npm workspace at web/; the server uses Node built-in http (no Express) and serves the built web assets.",
+  "existingCodeLeverage": [
+    { "subProblem": "Coordinate ops across engines", "existingCode": "src/core/orchestrator.ts", "action": "extend" },
+    { "subProblem": "Engine contract", "existingCode": "src/core/adapter/types.ts", "action": "extend" },
+    { "subProblem": "Resolve engine -> adapter", "existingCode": "src/core/adapter/registry.ts", "action": "reuse" },
+    { "subProblem": "Manifest / snapshot records", "existingCode": "src/core/manifest/{types,schema,store}.ts", "action": "extend" },
+    { "subProblem": "Postgres dump/restore/exec", "existingCode": "src/adapters/postgres/{index,pgtools}.ts, src/util/exec.ts", "action": "extend" },
+    { "subProblem": "Compose root / adapter registration", "existingCode": "src/cli/index.ts", "action": "extend" },
+    { "subProblem": "Engine-agnostic boundary guard", "existingCode": "test/arch/agnostic.test.ts, eslint.config.js", "action": "extend" },
+    { "subProblem": "Local web server / HTTP", "existingCode": "(none)", "action": "build" },
+    { "subProblem": "React frontend / Vite / Tailwind", "existingCode": "(none)", "action": "build" }
+  ],
+  "failureModes": [
+    { "risk": "Engine specifics leak into the new server layer", "affectedTasks": ["TASK-013", "TASK-014", "TASK-015", "TASK-022"], "mitigation": "Server talks only to the Orchestrator + capability guards; eslint + arch test extended to src/server/** (TASK-027)" },
+    { "risk": "Capability methods called on an engine that lacks them", "affectedTasks": ["TASK-009", "TASK-021"], "mitigation": "isInspectable/isMaterializable guards (TASK-001) + typed 'not supported' errors; proven with a fake adapter (TASK-025)" },
+    { "risk": "Scratch DB leaked after a failed diff", "affectedTasks": ["TASK-008", "TASK-021"], "mitigation": "dispose() in finally; materialize drops a half-created DB on restore failure; asserted in TASK-025/028" },
+    { "risk": "SQL injection via table/column identifiers in preview", "affectedTasks": ["TASK-006", "TASK-014"], "mitigation": "Quote all identifiers; never string-interpolate names; injection test (TASK-024)" },
+    { "risk": "Local web server reachable by other users / CSRF from a browser", "affectedTasks": ["TASK-012", "TASK-015"], "mitigation": "Bind 127.0.0.1 only + per-session token required on /api/*; token test (TASK-026)" },
+    { "risk": "Destructive op triggered from the UI by accident", "affectedTasks": ["TASK-013", "TASK-018"], "mitigation": "Server requires {confirm:true} on checkout/delete; UI gates them behind a confirm dialog" },
+    { "risk": "Snapshot inspection summary slows or breaks snapshot", "affectedTasks": ["TASK-010"], "mitigation": "Best-effort + non-fatal; omitted on error; snapshot still succeeds" },
+    { "risk": "Unbounded row preview / diff payloads (DoS / memory)", "affectedTasks": ["TASK-006", "TASK-014", "TASK-021", "TASK-022"], "mitigation": "Cap/validate limit/offset; bound row-level diff size; 413 on oversized request bodies (TASK-011)" },
+    { "risk": "Two build systems (CJS server vs ESM/Vite web) collide", "affectedTasks": ["TASK-004", "TASK-031"], "mitigation": "Separate web/ workspace + tsconfig; type-only @bw/dto sharing; build copies web/dist -> dist/web" },
+    { "risk": "Manifest back-compat broken by the new inspection field", "affectedTasks": ["TASK-003"], "mitigation": "Field is optional; old manifests validate; back-compat asserted" },
+    { "risk": "Full cross-branch diff materializes an entire snapshot into a scratch DB — slow/large for big databases", "affectedTasks": ["TASK-021", "TASK-022"], "mitigation": "Count/schema diff from manifest summaries is the cheap default; full row-level diff is opt-in and bounded; consider a timeout on materialize" }
+  ],
+  "testCoverageMap": [
+    { "codepath": "Postgres table-list / preview SQL + identifier quoting", "coveringTask": "TASK-024", "testType": "unit" },
+    { "codepath": "Postgres materialize: scratch DB create/restore/drop + dispose", "coveringTask": "TASK-024", "testType": "unit" },
+    { "codepath": "Snapshot records inspection summary (best-effort) + manifest back-compat", "coveringTask": "TASK-025", "testType": "unit" },
+    { "codepath": "Orchestrator inspect/preview + non-inspectable error", "coveringTask": "TASK-025", "testType": "unit" },
+    { "codepath": "Orchestrator diffBranches + scratch dispose()", "coveringTask": "TASK-025", "testType": "unit" },
+    { "codepath": "Real PG inspect + materialize + diff row delta", "coveringTask": "TASK-028", "testType": "integration" },
+    { "codepath": "Server ops/inspect/diff endpoints + DTO shapes", "coveringTask": "TASK-026", "testType": "integration" },
+    { "codepath": "Auth token rejection + destructive confirm gate", "coveringTask": "TASK-026", "testType": "integration" },
+    { "codepath": "SPA static fallback / 404 JSON", "coveringTask": "TASK-026", "testType": "integration" },
+    { "codepath": "No adapter import in src/server/**", "coveringTask": "TASK-027", "testType": "unit" },
+    { "codepath": "bw ui boot, token-gated /api/state, shutdown", "coveringTask": "TASK-030", "testType": "e2e" },
+    { "codepath": "ConfirmDialog gating, TableBrowser, DiffView rendering", "coveringTask": "TASK-029", "testType": "unit" }
+  ],
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "title": "Adapter introspection & materialization capability types",
+      "description": "Extend src/core/adapter/types.ts with OPTIONAL capability interfaces + value types: ColumnInfo, TableRef, TableInfo (name, schema?, rowCount: number|null, columns), EngineInspection (tables), TablePage (columns, rows, total, offset, limit), InspectableAdapter (inspect, previewTable), MaterializableAdapter (materialize -> MaterializedSnapshot), MaterializedSnapshot (context: AdapterContext, dispose()), and runtime guards isInspectable/isMaterializable. Pure types + guards, no engine imports.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P0",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "All capability interfaces + guards compile under strict mode with zero adapter imports",
+        "isInspectable/isMaterializable narrow an object lacking the methods to false",
+        "EngineAdapter itself is unchanged (capabilities are separate, opt-in interfaces)"
+      ],
+      "filesToModify": ["src/core/adapter/types.ts"],
+      "filesToCreate": [],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-002",
+      "title": "HTTP API DTO types",
+      "description": "Create src/server/dto.ts with request/response shapes for every endpoint: StateDTO, SnapshotReqDTO, BranchReqDTO, CheckoutReqDTO ({name, confirm:true}), DeleteReqDTO, EngineListDTO (name/type/inspectable), TableListDTO, TablePageDTO, BranchDiffDTO (table-level + row-level deltas), and a shared ApiError. Reuse TASK-001 table/column types. Plain types only.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-001"],
+      "acceptanceCriteria": [
+        "Every endpoint in the Architecture has a request and/or response DTO",
+        "BranchDiffDTO represents added/removed tables, per-table row-count delta, and schema changes",
+        "DTOs reuse TASK-001 TableInfo/ColumnInfo rather than redefining them"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/server/dto.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-003",
+      "title": "Manifest snapshot inspection summary (schema + types)",
+      "description": "Extend src/core/manifest/types.ts and schema.ts: add OPTIONAL inspection?: Record<string, EngineInspectionSummary> to SnapshotRecord (engine -> tables with name/schema/rowCount/columns, NO rows). Update zod schema with the optional field; existing manifests without it must still validate.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-001"],
+      "acceptanceCriteria": [
+        "A record with an inspection summary validates; one without it still validates (back-compat)",
+        "Summary carries table names, row counts, and column schema but never row data",
+        "Types and zod schema stay structurally aligned (existing alignment guard compiles)"
+      ],
+      "filesToModify": ["src/core/manifest/types.ts", "src/core/manifest/schema.ts"],
+      "filesToCreate": [],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-004",
+      "title": "npm workspace + web/ package scaffold",
+      "description": "Add workspaces:[web] to root package.json. Create web/package.json (react@19, react-dom@19; devDeps vite, @vitejs/plugin-react, typescript, tailwindcss, postcss, autoprefixer, vitest, @testing-library/react, jsdom) and web/tsconfig.json (strict, jsx react-jsx, paths alias @bw/dto -> ../src/server/dto for type-only imports). Keep web tsconfig independent of the root CJS tsconfig.",
+      "type": "infra",
+      "effort": "M",
+      "priority": "P0",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "npm install resolves the workspace and web deps without touching the CLI runtime deps",
+        "web/tsconfig.json is strict and independent of the root CJS tsconfig",
+        "A type-only import from @bw/dto resolves in the web package"
+      ],
+      "filesToModify": ["package.json"],
+      "filesToCreate": ["web/package.json", "web/tsconfig.json"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-005",
+      "title": "Vite + Tailwind config and HTML entry",
+      "description": "Create web/vite.config.ts (React plugin; dev server.proxy /api -> bw server; build.outDir dist), web/tailwind.config.js + web/postcss.config.js, and web/index.html (mounts #root, loads src/main.tsx, reads the server-injected session token). Tailwind scans index.html + src/**.",
+      "type": "infra",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-004"],
+      "acceptanceCriteria": [
+        "npm -w web run build produces web/dist/index.html + hashed assets (against a placeholder main.tsx entry)",
+        "Tailwind utility classes apply in a build",
+        "Dev server proxies /api/* so the SPA can call the bw server in dev"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["web/vite.config.ts", "web/tailwind.config.js", "web/index.html", "web/src/main.tsx"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-006",
+      "title": "Postgres introspection SQL builders",
+      "description": "Create src/adapters/postgres/introspect.ts: build + run (via util/exec/psql) queries against information_schema/pg_catalog to list user tables with row counts and column schema, and previewTable using safely quoted identifiers + LIMIT/OFFSET. Return TASK-001 EngineInspection/TablePage shapes. No secrets in argv (reuse buildPgEnv).",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-001"],
+      "acceptanceCriteria": [
+        "Table-list query is restricted to user schemas (excludes pg_catalog/information_schema)",
+        "previewTable quotes identifiers (a table named '\"a\"; drop' cannot inject SQL)",
+        "Row-count uses an estimate or null rather than a blocking full scan when unavailable"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/adapters/postgres/introspect.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-007",
+      "title": "PostgresAdapter implements InspectableAdapter",
+      "description": "Modify src/adapters/postgres/index.ts so PostgresAdapter implements InspectableAdapter (inspect, previewTable) delegating to introspect.ts, normalizing via normalizePgConnection. Keep PG specifics inside the adapter.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-006"],
+      "acceptanceCriteria": [
+        "isInspectable(new PostgresAdapter()) is true",
+        "inspect() returns tables with counts; previewTable() honors limit/offset",
+        "previewTable() on a non-existent table rejects with a clear error (no silent empty page)"
+      ],
+      "filesToModify": ["src/adapters/postgres/index.ts"],
+      "filesToCreate": [],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-008",
+      "title": "PostgresAdapter implements MaterializableAdapter (scratch DB)",
+      "description": "Create src/adapters/postgres/materialize.ts and implement MaterializableAdapter in index.ts. materialize(ctx,id) creates a uniquely-named scratch DB (bw_scratch_<rand>), pg_restores the snapshot .dump into it, returns a MaterializedSnapshot whose context points at the scratch DB plus dispose() that DROPs it (terminating backends first). Reuse pgtools.",
+      "type": "feature",
+      "effort": "L",
+      "priority": "P1",
+      "dependsOn": ["TASK-007"],
+      "acceptanceCriteria": [
+        "materialize() returns a context addressing the scratch DB; inspect() on it works",
+        "dispose() drops the scratch DB and is idempotent (second call does not throw)",
+        "A pg_restore failure during materialize still drops the half-created scratch DB (no leak)"
+      ],
+      "filesToModify": ["src/adapters/postgres/index.ts"],
+      "filesToCreate": ["src/adapters/postgres/materialize.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-009",
+      "title": "Orchestrator inspection methods",
+      "description": "Modify src/core/orchestrator.ts: add inspectEngine(name) and previewTable(name, table, opts) that resolve the adapter via registry, narrow with isInspectable (TASK-001), and call through, throwing a clear 'engine does not support inspection' error otherwise. Import only capability interfaces, never an adapter.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-001"],
+      "acceptanceCriteria": [
+        "inspectEngine returns tables for an inspectable adapter",
+        "A non-inspectable engine yields a clear typed error (not a TypeError on a missing method)",
+        "orchestrator.ts still imports nothing from src/adapters/**"
+      ],
+      "filesToModify": ["src/core/orchestrator.ts"],
+      "filesToCreate": [],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-010",
+      "title": "Snapshot records an inspection summary (best-effort)",
+      "description": "Modify src/core/orchestrator.ts snapshot path: after each engine snapshot, if the adapter is inspectable, capture a lightweight summary (table names + counts + schema) onto SnapshotRecord.inspection (TASK-003). Best-effort: a failed/absent inspection must NOT fail the snapshot.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-003", "TASK-009"],
+      "acceptanceCriteria": [
+        "A snapshot over an inspectable engine records its table/count summary",
+        "A non-inspectable engine produces a valid snapshot with no inspection entry",
+        "An inspection error during snapshot is swallowed (logged) and the snapshot still succeeds"
+      ],
+      "filesToModify": ["src/core/orchestrator.ts"],
+      "filesToCreate": [],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-011",
+      "title": "HTTP router + static file serving util",
+      "description": "Create src/server/http.ts: a dependency-free router over Node http (method+path+params), JSON body parsing with a size cap, sendJson/sendError helpers, and a static-file handler with index.html SPA fallback and content-types. No external deps.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "Routes match by method + path params; unknown routes return 404 JSON",
+        "A request body over the size cap is rejected with 413 rather than buffered unbounded",
+        "Static handler serves index.html for unknown non-/api paths and 404s missing assets"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/server/http.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-012",
+      "title": "Localhost bind + per-session auth token",
+      "description": "Create src/server/security.ts: generate a random session token, a guard that rejects /api/* requests missing the token (header or query) with 401, and a helper asserting a 127.0.0.1 bind. Expose the token so the served HTML can embed it.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-011"],
+      "acceptanceCriteria": [
+        "An /api request without the valid token gets 401; with it, passes through",
+        "The token is unguessable (>=128 bits of randomness)",
+        "Static asset/index requests do not require the token (page can bootstrap)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/server/security.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-013",
+      "title": "Ops endpoints (state + snapshot/branch/checkout/delete)",
+      "description": "Create src/server/routes/ops.ts: GET /api/state (orchestrator.list()), POST /api/snapshot|branch|checkout|delete calling the injected orchestrator. checkout/delete REQUIRE {confirm:true} and return the orchestrator result (e.g. checkout autosaveId). Uses TASK-002 DTOs.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-002", "TASK-011"],
+      "acceptanceCriteria": [
+        "GET /api/state returns the manifest (branches, snapshots, head) as JSON",
+        "POST /api/checkout without confirm:true returns 400 and does NOT touch any database",
+        "An orchestrator error maps to a 4xx JSON ApiError, not a 500 stack"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/server/routes/ops.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-014",
+      "title": "Introspection endpoints (engines, tables, row preview)",
+      "description": "Create src/server/routes/inspect.ts: GET /api/engines (name/type/inspectable), GET /api/engines/:name/tables (orchestrator.inspectEngine), GET /api/engines/:name/tables/:table?limit&offset (orchestrator.previewTable). Validate/cap limit and offset. Uses TASK-002 DTOs.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-002", "TASK-009", "TASK-011"],
+      "acceptanceCriteria": [
+        "GET /api/engines flags which engines are inspectable",
+        "Tables/preview endpoints return TASK-002 DTO shapes; preview honors limit/offset",
+        "A limit above the cap (or non-numeric) is clamped/rejected rather than passed through unbounded"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/server/routes/inspect.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-015",
+      "title": "Server assembly + bw ui command",
+      "description": "Create src/server/server.ts (createBwServer({orchestrator, webDir}) wiring router + ops + inspect + static + auth; returns {url, token, close()}, binds 127.0.0.1) and src/cli/commands/ui.ts (registers bw ui [--port][--no-open], builds the orchestrator from injected deps, starts server, prints tokenized URL, optionally opens the browser). Register the command in src/cli/index.ts.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-011", "TASK-012", "TASK-013", "TASK-014"],
+      "acceptanceCriteria": [
+        "bw ui starts a server on 127.0.0.1 and prints a URL containing the session token",
+        "--port 0 picks a free port; --no-open does not launch a browser",
+        "src/server/** and src/cli/commands/ui.ts import nothing from src/adapters/**"
+      ],
+      "filesToModify": ["src/cli/index.ts"],
+      "filesToCreate": ["src/server/server.ts", "src/cli/commands/ui.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-016",
+      "title": "Web app shell + typed API client",
+      "description": "Replace the placeholder web/src/main.tsx (from TASK-005) to mount the real app reading the window token; create web/src/App.tsx (sidebar + main panel layout) and web/src/api.ts (typed fetch client attaching the token, parsing ApiError). Type-only imports from @bw/dto (TASK-002 via TASK-004 alias).",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-002", "TASK-005"],
+      "acceptanceCriteria": [
+        "The app renders a shell and calls GET /api/state through the client",
+        "The API client attaches the session token and surfaces ApiError.message on failures",
+        "A failed/non-JSON response is handled without crashing the app (error state shown)"
+      ],
+      "filesToModify": ["web/src/main.tsx"],
+      "filesToCreate": ["web/src/App.tsx", "web/src/api.ts"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-017",
+      "title": "Branch list + snapshot graph sidebar",
+      "description": "Create web/src/components/BranchList.tsx and web/src/components/SnapshotGraph.tsx: render branches (mark HEAD), snapshots with parent lineage, from /api/state. Selecting a branch sets the active branch in app state.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-016"],
+      "acceptanceCriteria": [
+        "Branches render with the current HEAD visually distinguished",
+        "Snapshots render newest-first with parent lineage",
+        "An empty repo renders an empty state, not a crash"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["web/src/components/BranchList.tsx", "web/src/components/SnapshotGraph.tsx"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-018",
+      "title": "Action bar + confirm dialog",
+      "description": "Create web/src/components/Actions.tsx (snapshot w/ message, create branch w/ name) and web/src/components/ConfirmDialog.tsx (modal). Checkout/delete go through the confirm dialog and post {confirm:true}; on success refetch /api/state and surface the checkout autosave id.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-016"],
+      "acceptanceCriteria": [
+        "Snapshot/branch actions call the API and refresh state on success",
+        "Checkout/delete are blocked until the confirm dialog is accepted",
+        "An API error from an action is shown to the user (not swallowed)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["web/src/components/Actions.tsx", "web/src/components/ConfirmDialog.tsx"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-019",
+      "title": "Engine table browser + row preview",
+      "description": "Create web/src/components/TableBrowser.tsx (per-engine table list with row counts) and web/src/components/TablePreview.tsx (paginated read-only rows with column headers/types). Drives /api/engines, /tables, /tables/:table. Non-inspectable engines show a 'browsing not supported' note.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-016"],
+      "acceptanceCriteria": [
+        "Selecting an engine lists its tables with row counts; selecting a table previews rows",
+        "Pagination updates offset and re-fetches",
+        "A non-inspectable engine renders the unsupported note instead of erroring"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["web/src/components/TableBrowser.tsx", "web/src/components/TablePreview.tsx"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-020",
+      "title": "Frontend data-fetching hooks",
+      "description": "Create web/src/hooks/useApi.ts: small typed hooks wrapping the API client with loading/error/refetch state (no heavy data library), used by the views; centralizes refetch-after-mutation.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P2",
+      "dependsOn": ["TASK-016"],
+      "acceptanceCriteria": [
+        "A hook exposes {data, loading, error, refetch} and ignores stale responses",
+        "Mutations can trigger a coordinated refetch of dependent queries",
+        "An unmounted component does not set state after an in-flight request resolves"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["web/src/hooks/useApi.ts"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-021",
+      "title": "Orchestrator diffBranches (counts/schema + scratch-DB row diff)",
+      "description": "Modify src/core/orchestrator.ts: add diffBranches(from, to). Use manifest inspection summaries (TASK-003/010) for instant table/count/schema diff when present; for full row-level diff, materialize (TASK-001 guard) the target snapshot into a scratch context, inspect/previewTable both sides, compute per-table deltas, then dispose() always, even on error. Engine-agnostic (capability guards only).",
+      "type": "feature",
+      "effort": "L",
+      "priority": "P2",
+      "dependsOn": ["TASK-010"],
+      "acceptanceCriteria": [
+        "Count/schema diff is returned from manifest summaries without materializing when both exist",
+        "Full diff materializes the target, computes row deltas, and dispose()s the scratch resource",
+        "If materialize/diff throws, dispose() still runs (no leaked scratch DB) and a clear error propagates"
+      ],
+      "filesToModify": ["src/core/orchestrator.ts"],
+      "filesToCreate": [],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-022",
+      "title": "Diff endpoint",
+      "description": "Create src/server/routes/diff.ts (GET /api/diff?from=&to= -> orchestrator.diffBranches, returning BranchDiffDTO) and mount it in src/server/server.ts. Validate both branches exist; bound row-level diff size.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-002", "TASK-015", "TASK-021"],
+      "acceptanceCriteria": [
+        "GET /api/diff?from=main&to=exp returns a BranchDiffDTO",
+        "Missing/unknown from/to yields 400, not a 500",
+        "Row-level diff output is bounded (capped), not an unbounded payload"
+      ],
+      "filesToModify": ["src/server/server.ts"],
+      "filesToCreate": ["src/server/routes/diff.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-023",
+      "title": "Cross-branch diff view",
+      "description": "Create web/src/components/DiffView.tsx and web/src/components/TableDiff.tsx: choose two branches, show table-level diff (added/removed tables, row-count deltas, schema changes), drill into a table's row-level diff. Drives /api/diff.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P3",
+      "dependsOn": ["TASK-016", "TASK-017"],
+      "acceptanceCriteria": [
+        "Selecting two branches renders the table-level diff with clear add/remove/changed markers",
+        "Drilling into a changed table shows row-level differences",
+        "Diffing a branch against itself shows 'no differences' (not an error)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["web/src/components/DiffView.tsx", "web/src/components/TableDiff.tsx"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-024",
+      "title": "Unit tests — Postgres introspection + materialize (mocked exec)",
+      "description": "Create test/adapters/postgres-introspect.test.ts and test/adapters/postgres-materialize.test.ts, mocking the exec/psql layer. Introspect: table-list targets user schemas, previewTable quotes identifiers + LIMIT/OFFSET, an injection-y table name can't break out. Materialize: creates a uniquely-named scratch DB, restores into it, dispose() drops it (idempotent; drops a half-created DB on restore failure).",
+      "type": "test",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-007", "TASK-008"],
+      "acceptanceCriteria": [
+        "Asserts table-list excludes system schemas and previewTable quotes identifiers + binds limit/offset",
+        "A malicious table name ('; DROP TABLE x; --) is safely quoted, not interpolated raw",
+        "Asserts materialize creates+restores a scratch DB and dispose() drops it (idempotent, incl. after a restore failure)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/adapters/postgres-introspect.test.ts", "test/adapters/postgres-materialize.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-025",
+      "title": "Unit tests — orchestrator inspect/diff with a fake capability adapter",
+      "description": "Create test/core/orchestrator-inspect.test.ts: a FakeInspectableAdapter implementing InspectableAdapter + MaterializableAdapter in memory. Proves the new paths are engine-agnostic with NO Postgres: inspect/preview, a non-inspectable engine error, and diffBranches (incl. that dispose() is called).",
+      "type": "test",
+      "effort": "L",
+      "priority": "P2",
+      "dependsOn": ["TASK-021"],
+      "acceptanceCriteria": [
+        "inspect/previewTable work end-to-end via the fake adapter (no Postgres)",
+        "A non-inspectable engine produces the typed 'not supported' error",
+        "diffBranches computes deltas and the fake dispose() is invoked exactly once (even on a forced error)",
+        "A snapshot over the fake inspectable adapter records the inspection summary on the SnapshotRecord; a forced inspection error is swallowed and the snapshot still succeeds (covers TASK-010); a manifest without the summary still loads (covers TASK-003 back-compat)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/core/orchestrator-inspect.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-026",
+      "title": "Server endpoint tests",
+      "description": "Create test/server/server.test.ts: boot createBwServer with a fake orchestrator on an ephemeral port; assert /api/state, ops (incl. checkout requiring confirm), inspection, and diff endpoints; token rejection (401) and SPA static fallback.",
+      "type": "test",
+      "effort": "L",
+      "priority": "P2",
+      "dependsOn": ["TASK-015", "TASK-022"],
+      "acceptanceCriteria": [
+        "Endpoints return the expected DTO JSON against a fake orchestrator",
+        "A request without the token gets 401; checkout without confirm gets 400",
+        "An unknown non-/api path serves index.html; an unknown /api path returns 404 JSON"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/server/server.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-027",
+      "title": "Extend engine-agnostic boundary to src/server/**",
+      "description": "Modify eslint.config.js (add src/server/**/*.ts to the no-restricted-imports scope forbidding src/adapters/**) and test/arch/agnostic.test.ts (scan src/server too, still exempting src/cli/index.ts).",
+      "type": "test",
+      "effort": "S",
+      "priority": "P2",
+      "dependsOn": ["TASK-011"],
+      "acceptanceCriteria": [
+        "eslint errors if a src/server file imports src/adapters/**",
+        "The arch test scans src/server and passes against the real tree",
+        "src/cli/index.ts remains the sole exempt composition root"
+      ],
+      "filesToModify": ["eslint.config.js", "test/arch/agnostic.test.ts"],
+      "filesToCreate": [],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-028",
+      "title": "Gated integration test — real Postgres introspect + materialize + diff",
+      "description": "Create test/integration/postgres-inspect.int.test.ts (gated on BW_TEST_PG_URL, skips when unset): snapshot a seeded DB, mutate, snapshot again, then assert inspect counts, a materialize round trip, and a diffBranches showing the row delta; clean up the scratch DB.",
+      "type": "test",
+      "effort": "L",
+      "priority": "P2",
+      "dependsOn": ["TASK-008", "TASK-021"],
+      "acceptanceCriteria": [
+        "With a real DB, inspect reports correct counts and diff shows the inserted-row delta",
+        "The scratch database created by materialize is dropped after the test",
+        "The suite SKIPS (not fails) when BW_TEST_PG_URL is unset"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/integration/postgres-inspect.int.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-029",
+      "title": "Frontend component tests (vitest + testing-library)",
+      "description": "Create web/vitest.config.ts and web/src/components/__tests__/components.test.tsx: render TableBrowser/TablePreview, ConfirmDialog (gates the destructive action), and DiffView (renders deltas) against a mocked API client.",
+      "type": "test",
+      "effort": "M",
+      "priority": "P3",
+      "dependsOn": ["TASK-018", "TASK-019", "TASK-023"],
+      "acceptanceCriteria": [
+        "ConfirmDialog does not fire its action until confirmed",
+        "TableBrowser renders tables/counts from a mocked response and a non-inspectable note",
+        "DiffView renders added/removed/changed markers from a mocked diff"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["web/vitest.config.ts", "web/src/components/__tests__/components.test.tsx"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-030",
+      "title": "bw ui boot e2e",
+      "description": "Create test/e2e/ui.test.ts: spawn bw ui --no-open --port 0 in a seeded workspace, parse the printed URL+token, GET /api/state (200 with token, 401 without), confirm index.html is served, then shut the server down.",
+      "type": "test",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-015"],
+      "acceptanceCriteria": [
+        "The server boots, serves index.html, and /api/state returns 200 with the token",
+        "/api/state without the token returns 401",
+        "The spawned process exits cleanly on teardown (no leaked port/process)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/e2e/ui.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-031",
+      "title": "Build pipeline (bundle the web app into dist)",
+      "description": "Modify root package.json build script and add scripts/build-web.mjs: run vite build for the workspace and copy web/dist -> dist/web so bw ui serves it from the published package; ensure dist/web and web/dist are git-ignored. Server resolves webDir to dist/web (prod) or proxies in dev.",
+      "type": "infra",
+      "effort": "M",
+      "priority": "P3",
+      "dependsOn": ["TASK-004", "TASK-015"],
+      "acceptanceCriteria": [
+        "npm run build produces both dist/cli/index.js and dist/web/index.html",
+        "A built bw ui serves the bundled assets from dist/web",
+        "Build artifacts (dist, web/dist) are git-ignored"
+      ],
+      "filesToModify": ["package.json", ".gitignore"],
+      "filesToCreate": ["scripts/build-web.mjs"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-032",
+      "title": "CI — build + test the workspace",
+      "description": "Modify .github/workflows/ci.yml: install workspaces, run root lint/typecheck/test + build, and the web build + vitest run; keep gated PG tests opt-in so CI is green without a DB.",
+      "type": "infra",
+      "effort": "S",
+      "priority": "P3",
+      "dependsOn": ["TASK-004", "TASK-029"],
+      "acceptanceCriteria": [
+        "CI installs workspaces and runs both backend and web test suites",
+        "CI builds the web bundle as part of the pipeline",
+        "Gated PG inspect/integration tests are skipped (not failed) without a database"
+      ],
+      "filesToModify": [".github/workflows/ci.yml"],
+      "filesToCreate": [],
+      "agent": "general-purpose"
+    },
+    {
+      "id": "TASK-033",
+      "title": "Docs — Web UI guide + adapter capabilities",
+      "description": "Update README.md (a Web UI section: bw ui, the localhost+token model, the table browser + cross-branch diff) and docs/ADAPTERS.md (document the OPTIONAL InspectableAdapter/MaterializableAdapter capabilities and that omitting them is fine).",
+      "type": "docs",
+      "effort": "M",
+      "priority": "P3",
+      "dependsOn": ["TASK-015", "TASK-021"],
+      "acceptanceCriteria": [
+        "README documents bw ui, its flags, and the security model (localhost + session token)",
+        "ADAPTERS.md documents both optional capabilities and that they are opt-in",
+        "Docs state that destructive ops in the UI require confirmation"
+      ],
+      "filesToModify": ["README.md", "docs/ADAPTERS.md"],
+      "filesToCreate": [],
+      "agent": "general-purpose"
+    }
+  ],
+  "dependencies": {
+    "TASK-001": [],
+    "TASK-002": ["TASK-001"],
+    "TASK-003": ["TASK-001"],
+    "TASK-004": [],
+    "TASK-005": ["TASK-004"],
+    "TASK-006": ["TASK-001"],
+    "TASK-007": ["TASK-006"],
+    "TASK-008": ["TASK-007"],
+    "TASK-009": ["TASK-001"],
+    "TASK-010": ["TASK-003", "TASK-009"],
+    "TASK-011": [],
+    "TASK-012": ["TASK-011"],
+    "TASK-013": ["TASK-002", "TASK-011"],
+    "TASK-014": ["TASK-002", "TASK-009", "TASK-011"],
+    "TASK-015": ["TASK-011", "TASK-012", "TASK-013", "TASK-014"],
+    "TASK-016": ["TASK-002", "TASK-005"],
+    "TASK-017": ["TASK-016"],
+    "TASK-018": ["TASK-016"],
+    "TASK-019": ["TASK-016"],
+    "TASK-020": ["TASK-016"],
+    "TASK-021": ["TASK-010"],
+    "TASK-022": ["TASK-002", "TASK-015", "TASK-021"],
+    "TASK-023": ["TASK-016", "TASK-017"],
+    "TASK-024": ["TASK-007", "TASK-008"],
+    "TASK-025": ["TASK-021"],
+    "TASK-026": ["TASK-015", "TASK-022"],
+    "TASK-027": ["TASK-011"],
+    "TASK-028": ["TASK-008", "TASK-021"],
+    "TASK-029": ["TASK-018", "TASK-019", "TASK-023"],
+    "TASK-030": ["TASK-015"],
+    "TASK-031": ["TASK-004", "TASK-015"],
+    "TASK-032": ["TASK-004", "TASK-029"],
+    "TASK-033": ["TASK-015", "TASK-021"]
+  }
+}

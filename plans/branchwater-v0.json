@@ -1,0 +1,536 @@
+{
+  "title": "Branchwater (bw) v0 — git for your local databases",
+  "branch": "feat/branchwater-v0",
+  "mode": "EXPANSION",
+  "overview": "Branchwater (bw) is an engine-agnostic TypeScript/Node CLI that snapshots all of a developer's configured local databases as one logical unit (a branch), lets them experiment freely, and rolls back in seconds. v0 ships the full architectural spine (orchestrator + adapter contract + JSON manifest) plus exactly one adapter (Postgres via pg_dump/pg_restore) and six CLI commands. The hard requirement is engine-agnosticism: adding MySQL/Redis/ZFS later must mean 'write a new adapter' with zero changes to the core.",
+  "scopeChallenge": "Greenfield repo (only .claude/ exists), so EXPANSION governs decomposition granularity and test depth, NOT feature scope. Phase 0 decisions confirmed with user: git-faithful branch model (immutable snapshots + movable branch pointers + HEAD); JSON manifest behind a repository interface (SQLite swappable later); auto safety-snapshot before destructive checkout; atomic manifest writes (temp+rename). Ruled out of v0: a second adapter, solving cross-engine write consistency (noted not solved), remote storage, PITR, multi-process locking. The ZFS/btrfs copy-on-write backend is designed-for (the adapter contract accommodates an opaque snapshot id and orchestrator-owned storageDir) but not built. Overriding risk: any Postgres specific concept leaking above the adapter boundary into core/manifest/CLI — guarded by eslint no-restricted-imports (TASK-002) and a runtime boundary test (TASK-024).",
+  "existingCodeLeverage": [
+    { "subProblem": "Project scaffold / tooling", "existingCode": "(none — empty repo)", "action": "build" },
+    { "subProblem": "Adapter contract", "existingCode": "(none)", "action": "build" },
+    { "subProblem": "Manifest store", "existingCode": "(none)", "action": "build" },
+    { "subProblem": "Orchestrator", "existingCode": "(none)", "action": "build" },
+    { "subProblem": "Postgres dump/restore", "existingCode": "system pg_dump/pg_restore binaries", "action": "reuse" },
+    { "subProblem": "CLI framework", "existingCode": "commander (npm)", "action": "reuse" },
+    { "subProblem": "Terminal output", "existingCode": "picocolors + spinner lib (npm)", "action": "reuse" },
+    { "subProblem": "Config/schema validation", "existingCode": "zod (npm)", "action": "reuse" },
+    { "subProblem": "ID generation", "existingCode": "ulid / crypto.randomUUID", "action": "reuse" }
+  ],
+  "failureModes": [
+    { "risk": "Postgres specifics leak above the adapter boundary into core/CLI", "affectedTasks": ["TASK-013", "TASK-014", "TASK-015", "TASK-016", "TASK-017"], "mitigation": "eslint no-restricted-imports (TASK-002) + runtime arch test (TASK-024) + orchestrator tested only with FakeAdapter (TASK-020)" },
+    { "risk": "Multi-engine write consistency (engines snapshotted at slightly different moments)", "affectedTasks": ["TASK-013"], "mitigation": "v0 = sequential best-effort, documented caveat (TASK-025); manifest written only after all engines succeed; future --quiesce hook noted" },
+    { "risk": "Destructive checkout silently discards current state", "affectedTasks": ["TASK-013", "TASK-015"], "mitigation": "Auto safety-snapshot before restore; surface autosave id; confirmation prompt unless --yes" },
+    { "risk": "Partial multi-engine snapshot leaves orphan artifacts", "affectedTasks": ["TASK-013"], "mitigation": "Rollback: delete partial engine artifacts and abort before writing the manifest" },
+    { "risk": "Partial multi-engine restore leaves engines split across branches (checkout half-applied)", "affectedTasks": ["TASK-013", "TASK-015"], "mitigation": "Auto safety-snapshot taken first; on mid-checkout failure, report restored-vs-failed engines and point to the autosave for recovery; documented as best-effort (no cross-engine restore transaction in v0)" },
+    { "risk": "Manifest corruption on crash mid-write", "affectedTasks": ["TASK-010"], "mitigation": "Atomic write (temp file + rename); schema-validate on load" },
+    { "risk": "pg_restore blocked by live connections / ownership errors", "affectedTasks": ["TASK-011", "TASK-012"], "mitigation": "Terminate competing backends before restore; --clean --if-exists --no-owner" },
+    { "risk": "Shell injection via connection strings / names", "affectedTasks": ["TASK-006", "TASK-011"], "mitigation": "spawn with argv array, never a shell string" },
+    { "risk": "Snapshot GC deletes a snapshot still shared by another branch", "affectedTasks": ["TASK-010", "TASK-016"], "mitigation": "Reference-count snapshots across all branches before GC; unit-tested (TASK-018)" },
+    { "risk": "CI fails without a live Postgres", "affectedTasks": ["TASK-022", "TASK-026"], "mitigation": "Integration test skips cleanly when no DB; gated behind env flag" }
+  ],
+  "testCoverageMap": [
+    { "codepath": "Manifest save/load round-trip + atomic write", "coveringTask": "TASK-018", "testType": "unit" },
+    { "codepath": "Snapshot GC (shared vs unreferenced)", "coveringTask": "TASK-018", "testType": "unit" },
+    { "codepath": "Adapter registry register/resolve + unknown type", "coveringTask": "TASK-019", "testType": "unit" },
+    { "codepath": "Config load + env interpolation + validation failures", "coveringTask": "TASK-019", "testType": "unit" },
+    { "codepath": "Orchestrator multi-engine snapshot/checkout/delete (engine-agnostic)", "coveringTask": "TASK-020", "testType": "unit" },
+    { "codepath": "Orchestrator partial-failure rollback", "coveringTask": "TASK-020", "testType": "unit" },
+    { "codepath": "Checkout auto-safety-snapshot", "coveringTask": "TASK-020", "testType": "unit" },
+    { "codepath": "Postgres adapter argv construction + artifact paths", "coveringTask": "TASK-021", "testType": "unit" },
+    { "codepath": "Postgres connection schema validation", "coveringTask": "TASK-021", "testType": "unit" },
+    { "codepath": "Real snapshot->mutate->restore data correctness", "coveringTask": "TASK-022", "testType": "integration" },
+    { "codepath": "Full six-command CLI happy path + error exits", "coveringTask": "TASK-023", "testType": "e2e" },
+    { "codepath": "No adapter import in core/CLI commands", "coveringTask": "TASK-024", "testType": "unit" }
+  ],
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "title": "Project scaffold — package, TS config, gitignore",
+      "description": "Create package.json (bin.bw -> dist/cli/index.js, scripts: build/typecheck/lint/format/test, deps: commander/picocolors/spinner/zod, devDeps: typescript/jest/ts-jest/@types/eslint/prettier/tsx), strict tsconfig.json (strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes, ES2022, outDir dist), and .gitignore (node_modules, dist, .bw). Create the src/ skeleton.",
+      "type": "infra",
+      "effort": "S",
+      "priority": "P0",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "npm install succeeds and npx tsc --noEmit runs with zero config errors on an empty src/",
+        "package.json declares bin.bw pointing at the built CLI entry",
+        "tsconfig has strict: true and noUncheckedIndexedAccess: true (a non-strict file would error)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["package.json", "tsconfig.json", ".gitignore"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-002",
+      "title": "Lint, format & test tooling + engine-boundary lint rule",
+      "description": "Create eslint.config.js, .prettierrc, jest.config.js (ts-jest, testMatch test/**/*.test.ts). Add eslint no-restricted-imports forbidding any file under src/core/** or src/cli/** from importing src/adapters/** — the static half of the engine-agnostic guard.",
+      "type": "infra",
+      "effort": "S",
+      "priority": "P0",
+      "dependsOn": ["TASK-001"],
+      "acceptanceCriteria": [
+        "npm run lint and npm run format -- --check execute cleanly on the skeleton",
+        "npm test runs jest (zero tests pass without error)",
+        "A deliberate import from src/core/foo.ts to src/adapters/postgres triggers an eslint error"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["eslint.config.js", ".prettierrc", "jest.config.js"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-003",
+      "title": "Adapter contract — EngineAdapter interface & value types",
+      "description": "Create src/core/adapter/types.ts defining EngineSnapshotId, AdapterContext, AdapterLogger, SnapshotResult, EngineSnapshotInfo, EngineAdapter, AdapterFactory. Pure types, no engine imports. config is typed unknown; opaque EngineSnapshotId; orchestrator-owned storageDir. Document the agnosticism rationale per member.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P0",
+      "dependsOn": ["TASK-001"],
+      "acceptanceCriteria": [
+        "All seven exports compile under strict mode with no runtime code",
+        "AdapterContext.config is typed unknown (no engine-specific fields anywhere)",
+        "File imports nothing from src/adapters/**"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/core/adapter/types.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-004",
+      "title": "Manifest schema & types",
+      "description": "Create src/core/manifest/types.ts (Manifest, BranchRef, SnapshotRecord) and src/core/manifest/schema.ts (zod manifestSchema mirroring the types). Reject unknown version values and malformed records.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P0",
+      "dependsOn": ["TASK-001"],
+      "acceptanceCriteria": [
+        "manifestSchema.parse() accepts a valid manifest with branches + snapshots + HEAD",
+        "Parsing version: 2 or a branch pointing at a missing snapshot id is rejected",
+        "Types and zod schema stay structurally in sync"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/core/manifest/types.ts", "src/core/manifest/schema.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-005",
+      "title": "Config schema & types",
+      "description": "Create src/core/config/types.ts (BwConfig, EngineConfigEntry) and src/core/config/schema.ts (zod bwConfigSchema). connection is z.record(z.unknown()) — deliberately opaque so core stays engine-agnostic. Enforce unique engine names.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P0",
+      "dependsOn": ["TASK-001"],
+      "acceptanceCriteria": [
+        "bwConfigSchema.parse() accepts a config with one or more engines",
+        "Duplicate engine names are rejected with a clear error",
+        "connection accepts arbitrary keys (no Postgres fields hardcoded in core)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/core/config/types.ts", "src/core/config/schema.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-006",
+      "title": "Core utilities — safe exec & id generation",
+      "description": "Create src/util/exec.ts (Promise wrapper over child_process.spawn — argv array, NO shell interpolation; captures stdout/stderr; honors AbortSignal; rejects with exit code + stderr) and src/util/ids.ts (collision-resistant id generator, e.g. snap_<ulid>).",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P0",
+      "dependsOn": ["TASK-001"],
+      "acceptanceCriteria": [
+        "exec() resolves with stdout for zero-exit and rejects with stderr for non-zero",
+        "Arguments with shell metacharacters are passed literally, not interpreted",
+        "newId() returns unique values across 10k calls"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/util/exec.ts", "src/util/ids.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-007",
+      "title": "Terminal output — logger & spinner",
+      "description": "Create src/util/logger.ts (picocolors logger implementing AdapterLogger from TASK-003: info/warn/error/success/debug; respects verbose/quiet and a --json mode that suppresses decoration) and src/util/spinner.ts (start/succeed/fail/stop wrapper).",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-003", "TASK-006"],
+      "acceptanceCriteria": [
+        "Logger satisfies AdapterLogger (compile-checked assignability)",
+        "In --json mode no spinner/color escape codes are written to stdout",
+        "debug() output is suppressed unless verbose is enabled"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/util/logger.ts", "src/util/spinner.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-008",
+      "title": "Adapter registry",
+      "description": "Create src/core/adapter/registry.ts: register AdapterFactory by type string and resolve an EngineAdapter for a config entry. Throws a clear error for unknown types. Depends only on the TASK-003 contract — never a concrete adapter.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-003"],
+      "acceptanceCriteria": [
+        "register('postgres', factory) then resolve('postgres') returns a fresh adapter instance",
+        "resolve('redis') (unregistered) throws naming the missing type and listing known types",
+        "registry.ts imports nothing from src/adapters/**"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/core/adapter/registry.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-009",
+      "title": "Config loader with env-var interpolation",
+      "description": "Create src/core/config/load.ts: locate + read bw.config.json (honor --config/--cwd), interpolate ${ENV_VAR} in string values from process.env, then validate with bwConfigSchema. Throw actionable errors for missing file, bad JSON, validation failure, or unresolved env var.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-005"],
+      "acceptanceCriteria": [
+        "Loads + validates a well-formed config and resolves ${PGPASSWORD} from env",
+        "Missing config file produces a clear 'run bw init' style error (not a raw ENOENT)",
+        "An unresolved ${MISSING} env reference fails loudly rather than substituting empty string"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/core/config/load.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-010",
+      "title": "Manifest store (JSON repository, atomic write + GC)",
+      "description": "Create src/core/manifest/store.ts: a ManifestStore class backing .bw/manifest.json behind a repository interface (SQLite swappable later). Methods: init(), load() (schema-validated), save() (atomic temp+rename), createSnapshot(), getBranch/setBranch/deleteBranch(), setHead(), gcUnreferencedSnapshots().",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-004", "TASK-006"],
+      "acceptanceCriteria": [
+        "init() then load() round-trips; save() never leaves a partial file if interrupted (temp+rename)",
+        "gcUnreferencedSnapshots() returns exactly the snapshots no branch references and keeps shared ones",
+        "load() on a corrupt/invalid manifest.json throws via schema validation, not a silent default"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/core/manifest/store.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-011",
+      "title": "Postgres pg_dump/pg_restore command wrappers",
+      "description": "Create src/adapters/postgres/pgtools.ts: build/run pg_dump -Fc to a target file, pg_restore --clean --if-exists --no-owner from a file, plus a helper to terminate competing connections (pg_terminate_backend via psql). Use the TASK-006 exec() wrapper; surface tool-not-installed and auth errors clearly.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-006"],
+      "acceptanceCriteria": [
+        "Builds a correct pg_dump -Fc argv targeting a given file + connection",
+        "Builds a pg_restore --clean --if-exists --no-owner argv for that file",
+        "Missing pg_dump binary on PATH produces a clear 'install postgresql-client' error"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/adapters/postgres/pgtools.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-012",
+      "title": "PostgresAdapter implementing EngineAdapter",
+      "description": "Create src/adapters/postgres/index.ts (PostgresAdapter implements EngineAdapter, type='postgres') and src/adapters/postgres/config.ts (zod schema for the connection block: url OR host/port/user/password/database). snapshot() dumps to <storageDir>/<id>.dump and returns { id }; restore() runs pg_restore; list()/delete() manage .dump files; validate() checks reachability. All PG specifics live here.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-003", "TASK-011"],
+      "acceptanceCriteria": [
+        "snapshot() returns an opaque id and writes a dump file under the provided storageDir",
+        "restore() of a non-existent id throws rather than silently no-op'ing",
+        "The connection zod schema rejects a block missing both url and host+database"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/adapters/postgres/index.ts", "src/adapters/postgres/config.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-013",
+      "title": "Orchestrator (the brain)",
+      "description": "Create src/core/orchestrator.ts: a class constructed with registry, config, manifest store, and logger (via TASK-003/008/009/010 interfaces — never imports a concrete adapter). Implements snapshot(msg?) (call every engine's snapshot(), bundle ids into one SnapshotRecord, advance HEAD; on any engine failure delete partial artifacts + abort before writing manifest), branch(name), checkout(name) (auto safety-snapshot -> restore all engines -> move HEAD), list(), delete(name) (+ GC artifacts via adapters).",
+      "type": "feature",
+      "effort": "L",
+      "priority": "P1",
+      "dependsOn": ["TASK-003", "TASK-008", "TASK-009", "TASK-010"],
+      "acceptanceCriteria": [
+        "snapshot() over 2 fake engines produces one SnapshotRecord whose engines map has both ids and advances HEAD",
+        "If one engine's snapshot() throws, no manifest entry is written and the other engine's partial artifact is deleted",
+        "checkout() creates an autosave snapshot of current state before calling restore() on each engine",
+        "If one engine's restore() fails mid-checkout, the orchestrator reports which engines were restored vs failed and surfaces the autosave snapshot id for recovery (no silent split-brain)",
+        "orchestrator.ts imports nothing from src/adapters/**"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/core/orchestrator.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-014",
+      "title": "CLI commands — init & snapshot",
+      "description": "Create src/cli/commands/init.ts (scaffold bw.config.json if absent, create .bw/ via ManifestStore.init(), capture a root snapshot on branch main) and src/cli/commands/snapshot.ts (parse -m/--message, call orchestrator.snapshot(), print result). Commands receive a constructed orchestrator; no business logic in the command layer.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-013"],
+      "acceptanceCriteria": [
+        "init is idempotent-safe: re-running on an initialized repo warns instead of clobbering the manifest",
+        "snapshot -m 'msg' records the message on the new SnapshotRecord",
+        "snapshot before init exits non-zero with a clear 'run bw init first' message"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/cli/commands/init.ts", "src/cli/commands/snapshot.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-015",
+      "title": "CLI commands — branch & checkout",
+      "description": "Create src/cli/commands/branch.ts (orchestrator.branch(name)) and src/cli/commands/checkout.ts (orchestrator.checkout(name); confirm unless --yes since checkout is destructive; surface the autosave snapshot name so the user knows how to undo).",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-013"],
+      "acceptanceCriteria": [
+        "branch <name> creates a pointer at the current snapshot without switching HEAD",
+        "checkout <name> prints the autosave snapshot id created before restore",
+        "checkout <missing-branch> exits non-zero without touching any database"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/cli/commands/branch.ts", "src/cli/commands/checkout.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-016",
+      "title": "CLI commands — list & delete",
+      "description": "Create src/cli/commands/list.ts (render branches with * for current, snapshots, lineage; support --json) and src/cli/commands/delete.ts (orchestrator.delete(name); confirm unless --yes; report GC'd snapshots/artifacts).",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-013"],
+      "acceptanceCriteria": [
+        "list marks the current branch and renders machine-readable output under --json",
+        "delete <name> removes the branch and GCs only snapshots no other branch references",
+        "delete of the current/HEAD branch is refused with a clear error"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/cli/commands/list.ts", "src/cli/commands/delete.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-017",
+      "title": "CLI entry, global flags & adapter registration",
+      "description": "Create src/cli/index.ts: the commander program with global flags (--config, --cwd, --json, --yes, --verbose), shebang, centralized error handling (clean messages + non-zero exit codes; full stack only under --verbose), and a bootstrap that registers PostgresAdapter into the registry (the one place core meets the concrete adapter — the composition root). Wire in all six commands.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-007", "TASK-008", "TASK-012", "TASK-014", "TASK-015", "TASK-016"],
+      "acceptanceCriteria": [
+        "bw --help lists all six commands and global flags",
+        "An uncaught orchestrator error exits non-zero with a single clean line (full stack only under --verbose)",
+        "Postgres is the only adapter registered, and registration happens in the entry (not in core)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/cli/index.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-018",
+      "title": "Unit tests — manifest store",
+      "description": "Create test/manifest/store.test.ts: cover round-trip save/load, atomic-write behavior, branch pointer ops, HEAD updates, and GC of unreferenced vs shared snapshots.",
+      "type": "test",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-010"],
+      "acceptanceCriteria": [
+        "Tests pass for create -> save -> load round-trip and for GC keeping shared snapshots",
+        "A test asserts load() throws on a corrupted manifest file",
+        "A test asserts no partial file remains if save() is interrupted before rename"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/manifest/store.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-019",
+      "title": "Unit tests — adapter registry & config loader",
+      "description": "Create test/core/registry.test.ts and test/config/load.test.ts: cover register/resolve, unknown-type error, env interpolation, and validation failures.",
+      "type": "test",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-008", "TASK-009"],
+      "acceptanceCriteria": [
+        "Resolving an unregistered type throws with the known-types list",
+        "Config loader resolves ${VAR} and fails on an unresolved var",
+        "Invalid config (duplicate engine names) is rejected by the loader test"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/core/registry.test.ts", "test/config/load.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-020",
+      "title": "Unit tests — orchestrator with a FAKE in-memory adapter",
+      "description": "Create test/core/orchestrator.test.ts using a FakeAdapter (in-memory, implements EngineAdapter). Primary proof of engine-agnosticism: the orchestrator must work end-to-end with a non-Postgres adapter. Cover multi-engine snapshot bundling, partial-failure rollback, checkout auto-safety-snapshot, and delete+GC.",
+      "type": "test",
+      "effort": "L",
+      "priority": "P2",
+      "dependsOn": ["TASK-013"],
+      "acceptanceCriteria": [
+        "Full snapshot -> branch -> checkout -> delete flow passes using ONLY the FakeAdapter (no Postgres)",
+        "A simulated mid-snapshot engine failure leaves the manifest unchanged and cleans partial artifacts",
+        "Checkout is shown to create an autosave snapshot before any restore() call"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/core/orchestrator.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-021",
+      "title": "Unit tests — Postgres adapter (mocked exec)",
+      "description": "Create test/adapters/postgres.test.ts: mock the TASK-006 exec/pgtools layer and assert the adapter builds correct argv, returns opaque ids, writes/reads/deletes the right artifact paths, and validates the connection schema.",
+      "type": "test",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-012"],
+      "acceptanceCriteria": [
+        "Asserts snapshot() invokes pg_dump -Fc with the configured connection + storage path",
+        "Asserts restore() invokes pg_restore --clean --if-exists",
+        "Connection schema test rejects a block with neither url nor host+database"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/adapters/postgres.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-022",
+      "title": "Integration test — Postgres against a real database (gated)",
+      "description": "Create test/integration/postgres.int.test.ts: snapshot -> mutate -> restore against a real Postgres, gated on an env flag / availability (skips cleanly when no DB, e.g. testcontainers or BW_TEST_PG_URL). Verifies data actually returns to the snapshotted state.",
+      "type": "test",
+      "effort": "L",
+      "priority": "P2",
+      "dependsOn": ["TASK-012"],
+      "acceptanceCriteria": [
+        "With a real DB available, a row inserted after snapshot is gone after restore",
+        "The test skips (not fails) when no Postgres is configured/available",
+        "Artifacts are cleaned up after the test run"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/integration/postgres.int.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-023",
+      "title": "End-to-end CLI smoke test",
+      "description": "Create test/e2e/cli.test.ts: spawn the built bw binary through init -> snapshot -> branch -> checkout -> list -> delete against a gated real Postgres (reuse the TASK-022 gating, e.g. BW_TEST_PG_URL/testcontainers; skips cleanly when absent), asserting exit codes and output. The happy path must use Postgres, NOT the FakeAdapter, because the built binary registers only Postgres (TASK-017). The error-path assertions fail before touching any engine, so they run unconditionally.",
+      "type": "test",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-017"],
+      "acceptanceCriteria": [
+        "The full six-command happy path (gated on a real Postgres; skipped when absent) exits 0 and list reflects the expected branches",
+        "bw checkout <missing> exits non-zero with a clear message (runs without a DB)",
+        "bw snapshot before bw init exits non-zero (runs without a DB)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/e2e/cli.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-024",
+      "title": "Architecture boundary test (runtime engine-agnostic guard)",
+      "description": "Create test/arch/agnostic.test.ts: statically scan src/core/** and src/cli/commands/** source for any import of src/adapters/**, failing if found. Complements the eslint rule (TASK-002) as a CI-enforced backstop.",
+      "type": "test",
+      "effort": "S",
+      "priority": "P2",
+      "dependsOn": ["TASK-013"],
+      "acceptanceCriteria": [
+        "Test passes against the real source tree (no leaks present)",
+        "Test fails if a fixture core file importing an adapter is introduced",
+        "The scan covers both src/core and src/cli/commands (not the entry composition root)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/arch/agnostic.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-025",
+      "title": "README — pitch, architecture & quickstart",
+      "description": "Create README.md: elevator pitch, the orchestrator/adapter/manifest architecture (with diagram + engine boundary), a quickstart (bw init -> snapshot -> branch -> checkout), and an explicit 'Multi-engine write consistency' caveat (v0 snapshots engines sequentially, best-effort; true cross-engine point-in-time consistency requires quiescing writes — future work).",
+      "type": "docs",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-017"],
+      "acceptanceCriteria": [
+        "README contains the elevator pitch, architecture overview, and a copy-pasteable quickstart",
+        "The multi-engine consistency limitation is documented explicitly, not glossed over",
+        "Every CLI command from the surface table is documented with an example"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["README.md"],
+      "agent": "general-purpose"
+    },
+    {
+      "id": "TASK-026",
+      "title": "CI workflow",
+      "description": "Create .github/workflows/ci.yml: on push/PR run install -> lint -> typecheck -> test -> build on a current Node LTS. Keep the gated integration test (TASK-022) opt-in so CI is green without a live database.",
+      "type": "infra",
+      "effort": "S",
+      "priority": "P2",
+      "dependsOn": ["TASK-002"],
+      "acceptanceCriteria": [
+        "Workflow runs lint, typecheck, unit tests, and build as required steps",
+        "The gated Postgres integration test does not fail CI when no DB is provisioned",
+        "Workflow triggers on both push and pull_request"
+      ],
+      "filesToModify": [],
+      "filesToCreate": [".github/workflows/ci.yml"],
+      "agent": "general-purpose"
+    },
+    {
+      "id": "TASK-027",
+      "title": "Adapter-authoring guide & example config",
+      "description": "Create docs/ADAPTERS.md (step-by-step: implement EngineAdapter, validate your connection block with zod, register in the entry — proving 'new engine = new adapter, zero core change') and bw.config.example.json.",
+      "type": "docs",
+      "effort": "S",
+      "priority": "P3",
+      "dependsOn": ["TASK-003", "TASK-012"],
+      "acceptanceCriteria": [
+        "The guide walks through implementing all five EngineAdapter methods with a non-PG example",
+        "It states the zero-core-change rule and points at the registration site (TASK-017)",
+        "bw.config.example.json validates against bwConfigSchema"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["docs/ADAPTERS.md", "bw.config.example.json"],
+      "agent": "general-purpose"
+    }
+  ],
+  "dependencies": {
+    "TASK-001": [],
+    "TASK-002": ["TASK-001"],
+    "TASK-003": ["TASK-001"],
+    "TASK-004": ["TASK-001"],
+    "TASK-005": ["TASK-001"],
+    "TASK-006": ["TASK-001"],
+    "TASK-007": ["TASK-003", "TASK-006"],
+    "TASK-008": ["TASK-003"],
+    "TASK-009": ["TASK-005"],
+    "TASK-010": ["TASK-004", "TASK-006"],
+    "TASK-011": ["TASK-006"],
+    "TASK-012": ["TASK-003", "TASK-011"],
+    "TASK-013": ["TASK-003", "TASK-008", "TASK-009", "TASK-010"],
+    "TASK-014": ["TASK-013"],
+    "TASK-015": ["TASK-013"],
+    "TASK-016": ["TASK-013"],
+    "TASK-017": ["TASK-007", "TASK-008", "TASK-012", "TASK-014", "TASK-015", "TASK-016"],
+    "TASK-018": ["TASK-010"],
+    "TASK-019": ["TASK-008", "TASK-009"],
+    "TASK-020": ["TASK-013"],
+    "TASK-021": ["TASK-012"],
+    "TASK-022": ["TASK-012"],
+    "TASK-023": ["TASK-017"],
+    "TASK-024": ["TASK-013"],
+    "TASK-025": ["TASK-017"],
+    "TASK-026": ["TASK-002"],
+    "TASK-027": ["TASK-003", "TASK-012"]
+  }
+}

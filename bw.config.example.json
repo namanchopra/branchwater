@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "engines": [
+    {
+      "name": "app-db",
+      "type": "postgres",
+      "connection": {
+        "url": "postgres://postgres:${PGPASSWORD}@localhost:5432/app_dev"
+      }
+    }
+  ]
+}

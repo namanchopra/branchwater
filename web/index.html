@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Branchwater</title>
+    <script>
+      // The bw server injects the per-session API token by rewriting this
+      // placeholder before serving index.html. The web client reads
+      // window.__BW_TOKEN__ and sends it on every /api/* request. When the
+      // placeholder is left untouched (e.g. raw `vite dev`), it stays null.
+      window.__BW_TOKEN__ = '__BW_TOKEN__' === '__' + 'BW_TOKEN__' ? null : '__BW_TOKEN__';
+    </script>
+    <script>
+      // Apply the saved theme BEFORE first paint so there is no light/dark flash.
+      // Mirrors the resolution in src/theme.tsx (key + system fallback); the
+      // ThemeProvider takes over once React mounts.
+      (function () {
+        try {
+          var pref = localStorage.getItem('bw-theme') || 'system';
+          var dark =
+            pref === 'dark' ||
+            (pref === 'system' &&
+              window.matchMedia &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

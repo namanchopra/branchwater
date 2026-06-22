@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Branchwater theme tokens.
+ *
+ * One semantic palette, two value sets: `:root` is light, `[data-theme="dark"]`
+ * is dark. The ThemeProvider (src/theme.tsx) sets `data-theme` on <html> from
+ * the user's choice (light / dark / system); a tiny pre-paint script in
+ * index.html sets it before first paint to avoid a flash. Tailwind maps these
+ * to utility classes (see tailwind.config.js) so components stay theme-agnostic.
+ */
+:root {
+  --bw-bg: #f6f7f9;
+  --bw-surface: #ffffff;
+  --bw-surface-2: #f1f3f5;
+  --bw-surface-3: #e7ebef;
+  --bw-border: #e3e7eb;
+  --bw-border-strong: #cdd4db;
+  --bw-text: #0f1722;
+  --bw-text-2: #56616e;
+  --bw-text-3: #8b97a4;
+  --bw-accent: #0d9488;
+  --bw-accent-weak: #d6f3ee;
+  --bw-accent-text: #0b7d73;
+  --bw-accent-ink: #04231f;
+  --bw-danger: #dc4a40;
+  --bw-danger-weak: #fce7e5;
+  --bw-danger-text: #b3392f;
+  --bw-warn: #c2820a;
+  --bw-warn-weak: #fbf0d6;
+  --bw-warn-text: #8a5d06;
+  --bw-head: #6d4bd8;
+  --bw-head-weak: #ece6fb;
+  --bw-head-text: #5a3bc4;
+  --bw-overlay: rgba(16, 23, 34, 0.45);
+  --bw-shadow: 0 1px 2px rgba(16, 23, 34, 0.06), 0 8px 24px -12px rgba(16, 23, 34, 0.18);
+  --bw-shadow-lg: 0 4px 12px rgba(16, 23, 34, 0.08), 0 24px 48px -20px rgba(16, 23, 34, 0.28);
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --bw-bg: #0c1016;
+  --bw-surface: #131923;
+  --bw-surface-2: #1a212d;
+  --bw-surface-3: #232c3a;
+  --bw-border: #232c39;
+  --bw-border-strong: #34404f;
+  --bw-text: #e7edf4;
+  --bw-text-2: #9aa7b6;
+  --bw-text-3: #687485;
+  --bw-accent: #2dd4bf;
+  --bw-accent-weak: #103833;
+  --bw-accent-text: #5fe6d3;
+  --bw-accent-ink: #04231f;
+  --bw-danger: #f3766b;
+  --bw-danger-weak: #3a1a18;
+  --bw-danger-text: #f6968d;
+  --bw-warn: #e0b341;
+  --bw-warn-weak: #38300f;
+  --bw-warn-text: #ecc66b;
+  --bw-head: #a78bfa;
+  --bw-head-weak: #271f3f;
+  --bw-head-text: #c3b0fc;
+  --bw-overlay: rgba(0, 0, 0, 0.6);
+  --bw-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 32px -14px rgba(0, 0, 0, 0.7);
+  --bw-shadow-lg: 0 6px 16px rgba(0, 0, 0, 0.5), 0 28px 56px -20px rgba(0, 0, 0, 0.8);
+  color-scheme: dark;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--bw-bg);
+    color: var(--bw-text);
+    font-family: theme('fontFamily.sans');
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Smooth the light/dark swap without animating every child individually. */
+    transition: background-color 0.25s ease, color 0.25s ease;
+  }
+}
