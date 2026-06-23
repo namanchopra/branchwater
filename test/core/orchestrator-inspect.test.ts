@@ -587,14 +587,14 @@ describe("Orchestrator inspection/diff (driven entirely by a fake capability ada
       expect(emailChange?.to?.type).toBe("varchar");
     });
 
-    it("attaches row-level deltas and disposes the materialized snapshot exactly once", async () => {
+    it("attaches row-level deltas and disposes both materialized snapshots", async () => {
       const adapter = new FakeInspectableAdapter("fake-pg", baselineDataset());
       h = await makeHarness({ primary: adapter });
 
       // feature: same schema, but `users` gains a row (id=3) so a row-level diff
-      // exists. The live (`from`) side after the feature snapshot holds id=1..3;
-      // the materialized `to` side equals feature too — to surface a real
-      // row delta we instead make `from` differ by checking out main afterwards.
+      // exists vs main. diff(main -> feature) materializes BOTH snapshots into
+      // their own scratch databases and compares them directly — independent of
+      // which branch is currently checked out / live.
       const feature: FakeDataset = {
         tables: [
           {
@@ -639,11 +639,11 @@ describe("Orchestrator inspection/diff (driven entirely by a fake capability ada
       expect(usersDiff?.rowDelta?.removedRows).toEqual([]);
       expect(usersDiff?.rowDelta?.truncated).toBe(false);
 
-      // dispose() ran exactly once for the single materialization performed.
-      expect(adapter.disposeCount).toBe(before + 1);
+      // dispose() ran once per materialized side (from + to).
+      expect(adapter.disposeCount).toBe(before + 2);
     });
 
-    it("disposes exactly once and propagates the error when a row-level diff fails", async () => {
+    it("disposes both materialized sides and propagates the error when a row-level diff fails", async () => {
       const adapter = new FakeInspectableAdapter("fake-pg", baselineDataset());
       h = await makeHarness({ primary: adapter });
 
@@ -680,9 +680,9 @@ describe("Orchestrator inspection/diff (driven entirely by a fake capability ada
         /Row-level diff failed for engine "primary"/,
       );
 
-      // The materialized scratch resource was still torn down — exactly once —
-      // by the `finally`, even though the body threw before completing.
-      expect(adapter.disposeCount).toBe(before + 1);
+      // Both materialized scratch resources were still torn down by the
+      // `finally`, even though the body threw before completing.
+      expect(adapter.disposeCount).toBe(before + 2);
     });
 
     it("falls back to a summary-only diff (no dispose) for a non-materializable engine", async () => {

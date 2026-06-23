@@ -47,7 +47,10 @@ jest.mock("../../src/adapters/postgres/pgtools", () => {
 import { exec } from "../../src/util/exec";
 import type { ExecOptions } from "../../src/util/exec";
 import { pgRestore } from "../../src/adapters/postgres/pgtools";
-import { materialize } from "../../src/adapters/postgres/materialize";
+import {
+  materialize,
+  rewriteUrlDatabase,
+} from "../../src/adapters/postgres/materialize";
 import type { AdapterContext, AdapterLogger } from "../../src/core/adapter/types";
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
@@ -240,5 +243,33 @@ describe("materialize", () => {
       expect((args ?? []).join(" ")).not.toMatch(/DATABASE/i);
       expect(typeof opts?.input).toBe("string");
     }
+  });
+});
+
+describe("rewriteUrlDatabase", () => {
+  it("replaces the database in a standard host:port URL", () => {
+    expect(
+      rewriteUrlDatabase("postgres://u:p@localhost:5432/app", "bw_scratch_1"),
+    ).toBe("postgres://u:p@localhost:5432/bw_scratch_1");
+  });
+
+  it("replaces the database in a libpq SOCKET URI (empty host + user-info)", () => {
+    // `new URL` rejects this shape; the regression: it used to fall through and
+    // return the URL unchanged, pointing a scratch context at the LIVE database.
+    const out = rewriteUrlDatabase(
+      "postgresql://namanchopra@/bw_demo?host=/tmp&port=5432",
+      "bw_scratch_xyz",
+    );
+    expect(out).toContain("/bw_scratch_xyz");
+    expect(out).not.toContain("/bw_demo");
+    // The socket host + port query params are preserved.
+    expect(out).toContain("host=/tmp");
+    expect(out).toContain("port=5432");
+  });
+
+  it("preserves other query params and only swaps the path", () => {
+    expect(
+      rewriteUrlDatabase("postgresql://app@/db?host=/tmp&sslmode=require", "s2"),
+    ).toBe("postgresql://app@/s2?host=/tmp&sslmode=require");
   });
 });

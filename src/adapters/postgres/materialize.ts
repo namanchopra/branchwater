@@ -139,19 +139,33 @@ function addressingArgsFor(
 }
 
 /**
- * Return a copy of a libpq connection URL with its database path replaced by
- * `database`. A non-WHATWG-parseable DSN is returned unchanged (the discrete
- * `--dbname` override on the admin/scratch connection still applies elsewhere).
+ * Return a copy of a libpq connection URL with its database (the path segment)
+ * replaced by `database`.
+ *
+ * IMPORTANT: the WHATWG `URL` parser REJECTS libpq socket URIs such as
+ * `postgres://user@/db?host=/tmp&port=5432` — user-info with an empty host is a
+ * parse error and `new URL` throws. The previous implementation caught that and
+ * returned the URL UNCHANGED, which silently pointed a materialized scratch
+ * context back at the LIVE database (so a row-level diff compared live-vs-live
+ * and found nothing). The fallback below rewrites the database by string surgery
+ * for those URIs so the scratch connection actually targets the scratch DB.
  *
  * @param url The libpq connection URL.
  * @param database The replacement database name.
  */
-function rewriteUrlDatabase(url: string, database: string): string {
+export function rewriteUrlDatabase(url: string, database: string): string {
+  const encoded = encodeURIComponent(database);
   try {
     const parsed = new URL(url);
-    parsed.pathname = `/${encodeURIComponent(database)}`;
+    parsed.pathname = `/${encoded}`;
     return parsed.toString();
   } catch {
+    // `scheme://<authority>` then an optional `/<db>` path then an optional
+    // `?query`/`#fragment`. Replace only the path segment with the new database.
+    const m = /^([a-zA-Z][\w+.-]*:\/\/[^/?#]*)(?:\/[^?#]*)?([?#].*)?$/.exec(url);
+    if (m) {
+      return `${m[1]}/${encoded}${m[2] ?? ""}`;
+    }
     return url;
   }
 }
