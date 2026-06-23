@@ -1,6 +1,6 @@
 {
   "name": "branchwater",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "git for your local databases — an engine-agnostic CLI to snapshot, branch, and restore your local development databases.",
   "license": "MIT",
   "author": "Naman Chopra",

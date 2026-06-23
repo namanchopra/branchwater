@@ -126,9 +126,12 @@ export function SqlConsole(props: SqlConsoleProps): React.JSX.Element {
       const res = await api.executeSql(engine, trimmedSql);
       setResult(res.result);
       setConfirmOpen(false);
-      // Make the run undoable: restoring the pre-execution auto-snapshot.
-      recordUndo(res.undoSnapshotId, `Run SQL on "${engine}"`);
-      onMutated?.(res.undoSnapshotId);
+      // A read-only query (SELECT, …) takes no snapshot, so there is nothing to
+      // undo and no state change to refresh — only record undo for writes.
+      if (res.undoSnapshotId !== undefined) {
+        recordUndo(res.undoSnapshotId, `Run SQL on "${engine}"`);
+        onMutated?.(res.undoSnapshotId);
+      }
     } catch (err) {
       // Keep the dialog open so the corrected statement can be retried; the SQL
       // error message (e.g. a syntax error) surfaces inside the dialog.

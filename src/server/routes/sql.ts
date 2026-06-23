@@ -61,6 +61,60 @@ import { toStateDTO } from "./ops";
  * @param ctx - The route context (for the response).
  * @param err - The caught value.
  */
+/**
+ * Conservatively decide whether a statement is READ-ONLY, so the console can
+ * skip the (potentially expensive) pre-execution auto-snapshot for queries that
+ * cannot change data. A full `pg_dump` of every engine before a `SELECT` is pure
+ * overhead and clutters snapshot history.
+ *
+ * Read-only is asserted ONLY for a single statement that clearly cannot write:
+ * `SELECT` / `SHOW` / `TABLE` / `VALUES`, and `EXPLAIN` *without* `ANALYZE`
+ * (plain EXPLAIN never executes the plan). Everything else — `WITH` (which may
+ * wrap a data-modifying CTE), `EXPLAIN ANALYZE`, anything with a trailing second
+ * statement, or an unrecognized leading keyword — is treated as a WRITE and
+ * still snapshots first. The default is always "write" (safe).
+ *
+ * @param sql - The raw statement from the SQL console.
+ * @returns `true` only when the statement is confidently read-only.
+ */
+export function isReadOnlySql(sql: string): boolean {
+  // Strip leading line/block comments + whitespace to reach the first keyword.
+  let s = sql.trim();
+  for (;;) {
+    if (s.startsWith("--")) {
+      const nl = s.indexOf("\n");
+      s = nl === -1 ? "" : s.slice(nl + 1).trimStart();
+      continue;
+    }
+    if (s.startsWith("/*")) {
+      const end = s.indexOf("*/");
+      s = end === -1 ? "" : s.slice(end + 2).trimStart();
+      continue;
+    }
+    break;
+  }
+
+  // A trailing statement after a `;` means we cannot reason about all of it — be
+  // conservative and treat the batch as a write.
+  const semi = s.indexOf(";");
+  if (semi !== -1 && s.slice(semi + 1).trim().length > 0) return false;
+
+  const first = (/^[a-zA-Z]+/.exec(s)?.[0] ?? "").toUpperCase();
+  switch (first) {
+    case "SELECT":
+    case "SHOW":
+    case "TABLE":
+    case "VALUES":
+      return true;
+    case "EXPLAIN":
+      // EXPLAIN is read-only UNLESS it ANALYZEs, which actually runs the plan.
+      return !/\banalyze\b/i.test(s);
+    default:
+      // WITH (possible data-modifying CTE), INSERT/UPDATE/DELETE/DDL, etc.
+      return false;
+  }
+}
+
 function sendSqlError(ctx: RouteContext, err: unknown): void {
   const message = errorMessage(err);
   const lower = message.toLowerCase();
@@ -119,13 +173,19 @@ export function postSql(orchestrator: Orchestrator) {
     }
 
     try {
-      // Auto-snapshot FIRST so the pre-execution state is recoverable via Undo.
-      const undoSnapshotId = (await orchestrator.snapshot("before sql")).id;
+      // Auto-snapshot FIRST so the pre-execution state is recoverable via Undo —
+      // but ONLY for statements that can actually mutate. A read-only query (a
+      // SELECT, etc.) skips the snapshot entirely: it can't change data, so a
+      // full pg_dump of every engine would be wasted work + snapshot clutter.
+      const readOnly = isReadOnlySql(body.sql);
+      const undoSnapshotId = readOnly
+        ? undefined
+        : (await orchestrator.snapshot("before sql")).id;
       const result = await orchestrator.executeSql(name, body.sql);
       const manifest = await orchestrator.list();
       const res: SqlResDTO = {
         result,
-        undoSnapshotId,
+        ...(undoSnapshotId !== undefined ? { undoSnapshotId } : {}),
         state: toStateDTO(manifest),
       };
       sendJson(ctx.res, 200, res);

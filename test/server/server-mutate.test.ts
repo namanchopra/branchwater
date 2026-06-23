@@ -458,9 +458,26 @@ describe("createBwServer mutation + restore endpoints (fake orchestrator)", () =
     expectOrchestratorUntouched(calls);
   });
 
-  it("POST /api/engines/:name/sql WITH confirm:true auto-snapshots FIRST and returns undoSnapshotId + state", async () => {
+  it("POST /api/engines/:name/sql — a read-only SELECT runs WITHOUT a snapshot and returns no undoSnapshotId", async () => {
     const res = await postJson(port, "/api/engines/pg/sql", auth, {
       sql: "SELECT * FROM users",
+      confirm: true,
+    });
+    expect(res.status).toBe(200);
+
+    const body = parseJson<SqlResDTO>(res);
+    expect(body.result).toEqual(FAKE_SQL_RESULT);
+    // A SELECT cannot mutate, so no auto-snapshot is taken and there is nothing
+    // to undo.
+    expect(body.undoSnapshotId).toBeUndefined();
+    expect(calls.snapshot).toHaveLength(0);
+    expect(calls.order).toEqual(["executeSql"]);
+    expect(calls.executeSql[0]).toEqual({ name: "pg", sql: "SELECT * FROM users" });
+  });
+
+  it("POST /api/engines/:name/sql — a WRITE auto-snapshots FIRST and returns undoSnapshotId + state", async () => {
+    const res = await postJson(port, "/api/engines/pg/sql", auth, {
+      sql: "DELETE FROM users WHERE id = 1",
       confirm: true,
     });
     expect(res.status).toBe(200);
@@ -471,9 +488,12 @@ describe("createBwServer mutation + restore endpoints (fake orchestrator)", () =
     expect(body.state.head).toBe("main");
     expect(body.state.version).toBe(1);
 
-    // Auto-snapshot must precede the SQL execution.
+    // Auto-snapshot must precede the SQL execution for a mutating statement.
     expect(calls.order).toEqual(["snapshot", "executeSql"]);
-    expect(calls.executeSql[0]).toEqual({ name: "pg", sql: "SELECT * FROM users" });
+    expect(calls.executeSql[0]).toEqual({
+      name: "pg",
+      sql: "DELETE FROM users WHERE id = 1",
+    });
   });
 
   /* ------------------------------ insert ----------------------------- */

@@ -944,7 +944,7 @@ export class Orchestrator {
     // Layer 2: best-effort row-level enrichment for materializable engines. Each
     // engine's scratch resource is disposed in a `finally`; a genuine failure
     // there propagates (the summary diff is not silently returned in its place).
-    await this.enrichWithRowDeltas(diff, toSnapshot);
+    await this.enrichWithRowDeltas(diff, fromSnapshot, toSnapshot);
 
     return diff;
   }
@@ -1175,66 +1175,75 @@ export class Orchestrator {
    */
   private async enrichWithRowDeltas(
     diff: BranchDiff,
+    fromSnapshot: SnapshotRecord,
     toSnapshot: SnapshotRecord,
   ): Promise<void> {
+    // No table-level changes → no row-level deltas to compute, and nothing to
+    // materialize. Also the fast path for identical snapshots (diff of a branch
+    // against itself), which avoids two needless scratch-DB restores.
+    if (diff.changedTables.length === 0) return;
+
     for (const engine of this.config.engines) {
       const adapter = this.adapterFor(engine);
       if (!isMaterializable(adapter) || !isInspectable(adapter)) {
         continue;
       }
-      const engineSnapshotId = toSnapshot.engines[engine.name];
-      if (engineSnapshotId === undefined) {
+      const fromId = fromSnapshot.engines[engine.name];
+      const toId = toSnapshot.engines[engine.name];
+      if (fromId === undefined || toId === undefined) {
         this.logger.debug(
-          `Skipping row-level diff for engine "${engine.name}": target ` +
-            `snapshot "${toSnapshot.id}" has no artifact for it.`,
+          `Skipping row-level diff for engine "${engine.name}": a snapshot ` +
+            `(from "${fromSnapshot.id}" / to "${toSnapshot.id}") has no artifact for it.`,
         );
         continue;
       }
 
-      await this.rowDeltasForEngine(engine, adapter, engineSnapshotId, diff);
+      await this.rowDeltasForEngine(engine, adapter, fromId, toId, diff);
     }
   }
 
   /**
    * Compute and attach row-level deltas for ONE materializable engine.
    *
-   * Materializes the target snapshot into a scratch context, then for every
-   * changed table previews both the live (`from`) context and the scratch (`to`)
-   * context and records a capped set of added/removed rows onto that table's
-   * `rowDelta`. The scratch resource is ALWAYS disposed in `finally`;
-   * any error is wrapped and re-thrown with engine context.
+   * Materializes BOTH the `from` and `to` snapshots into isolated scratch
+   * databases and compares them directly: for every changed table, rows present
+   * only in `to` are "added", rows present only in `from` are "removed". Both
+   * scratch resources are ALWAYS disposed in `finally`; any error is wrapped and
+   * re-thrown with engine context.
+   *
+   * (Previously the live database was used as the `from` side, which was only
+   * correct when HEAD happened to be `from`. Materializing both sides makes the
+   * row-level delta correct for any pair of branches, regardless of HEAD.)
    *
    * @param engine The engine config entry being diffed.
    * @param adapter Its adapter, already narrowed to materializable + inspectable.
-   * @param engineSnapshotId The target snapshot's per-engine artifact id.
+   * @param fromSnapshotId The `from` snapshot's per-engine artifact id.
+   * @param toSnapshotId The `to` snapshot's per-engine artifact id.
    * @param diff The base diff to mutate in place with `rowDelta` entries.
    * @throws {Error} If materialization, preview, or delta computation fails.
    */
   private async rowDeltasForEngine(
     engine: EngineConfigEntry,
     adapter: MaterializableAdapter & InspectableAdapter,
-    engineSnapshotId: string,
+    fromSnapshotId: string,
+    toSnapshotId: string,
     diff: BranchDiff,
   ): Promise<void> {
     const liveCtx = this.contextFor(engine);
-    let materialized: MaterializedSnapshot | null = null;
+    let fromMat: MaterializedSnapshot | null = null;
+    let toMat: MaterializedSnapshot | null = null;
     try {
-      materialized = await adapter.materialize(liveCtx, engineSnapshotId);
-      const scratchCtx = materialized.context;
+      fromMat = await adapter.materialize(liveCtx, fromSnapshotId);
+      toMat = await adapter.materialize(liveCtx, toSnapshotId);
+      const fromCtx = fromMat.context;
+      const toCtx = toMat.context;
 
-      // Changed tables: rows present on the `from` (live) side but not on the
-      // `to` (scratch) side are "removed"; the reverse are "added".
       for (const table of diff.changedTables) {
         const ref: TableRef =
           table.schema !== undefined
             ? { name: table.name, schema: table.schema }
             : { name: table.name };
-        const delta = await this.computeRowDelta(
-          adapter,
-          liveCtx,
-          scratchCtx,
-          ref,
-        );
+        const delta = await this.computeRowDelta(adapter, fromCtx, toCtx, ref);
         if (delta !== null) {
           table.rowDelta = delta;
         }
@@ -1245,9 +1254,10 @@ export class Orchestrator {
         `Row-level diff failed for engine "${engine.name}": ${reason}`,
       );
     } finally {
-      if (materialized !== null) {
+      for (const mat of [fromMat, toMat]) {
+        if (mat === null) continue;
         try {
-          await materialized.dispose();
+          await mat.dispose();
         } catch (cause) {
           const reason = cause instanceof Error ? cause.message : String(cause);
           this.logger.warn(

@@ -406,8 +406,12 @@ export interface SqlReqDTO {
 export interface SqlResDTO extends MutationResDTO {
   /** The executed statement's result (always present for the SQL console). */
   result: MutationResult;
-  /** Id of the auto-snapshot taken before the statement ran (for Undo). */
-  undoSnapshotId: string;
+  /**
+   * Id of the auto-snapshot taken before the statement ran (for Undo). Present
+   * only for write statements — a read-only query (SELECT, etc.) skips the
+   * snapshot, so this is absent and there is nothing to undo.
+   */
+  undoSnapshotId?: string;
 }
 
 /* -------------------------------------------------------------------------- */

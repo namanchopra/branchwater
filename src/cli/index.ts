@@ -24,6 +24,9 @@
  * @module cli/index
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { Command } from "commander";
 
 import { AdapterRegistry } from "../core/adapter/registry";
@@ -115,9 +118,22 @@ function buildOrchestrator(
 export function buildProgram(): Command {
   const program = new Command();
 
+  // Version for `bw --version` / `-V`, read from package.json at the package root
+  // (dist/cli/index.js → ../../package.json once built; src/cli/ during tests).
+  let version = "0.0.0";
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(__dirname, "..", "..", "package.json"), "utf8"),
+    ) as { version?: string };
+    if (typeof pkg.version === "string") version = pkg.version;
+  } catch {
+    /* fall back to 0.0.0 if the manifest cannot be read */
+  }
+
   program
     .name("bw")
     .description("git for your local databases — snapshot, branch, and restore")
+    .version(version, "-V, --version", "output the bw version")
     .option("--config <path>", "path to bw.config.json")
     .option("--cwd <dir>", "working directory to resolve config and .bw against")
     .option("--json", "emit machine-readable JSON on stdout")
